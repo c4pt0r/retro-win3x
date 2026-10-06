@@ -80,12 +80,12 @@ only download them if you are entitled to use them.
 - Serial file transfer: `w16ctl put/get/ls/rm/mkdir` (put ~20 KB/s, get ~4 KB/s)
 
 ## LLM chat window (`CHAT.EXE`)
-- Source in `win16dev/chat/` (UTF-8 source, see below); `make run` copies it into the VM and starts it.
+- Source in `win16dev/chat/`; `make run` copies it into the VM and starts it.
 - Path: `CHAT.EXE` ⇄ COM2 ⇄ `vm/com2.sock` ⇄ `w16chatd` ⇄ `pi -p --mode json --session-id <conversation>`.
 - `run.sh` starts `w16chatd` in the background (log: `vm/w16chatd.log`); pi runs in `~/w16chat`.
   Other directory or pi options: `w16chatd --cwd DIR -- --model xxx --no-tools`.
 - The window title shows `LLM - <agent> - <model>`. Enter sends, Ctrl+Enter inserts a line break;
-  while a reply is streaming the Send button becomes Stop; "New" starts a new pi session.
+  while a reply is streaming the Send button becomes Stop; New starts a new pi session.
 - Protocol (one command per line, payload = base64 of GBK text): Windows → Linux `HELLO` / `MSG` /
   `NEW` / `STOP`; Linux → Windows `B` (reply begins), `T` (text), `E` (reply ends), `S` (status line),
   `X` (error), `I` (`agent|model` for the title).
@@ -96,4 +96,4 @@ Note: pi can run commands and edit files on the host (in its working directory).
 ## Chinese source files
 Put `GBK = 1` in a Win16 project's Makefile to write Chinese text in UTF-8 source files: they are
 converted to GBK before compiling, and wcc/wrc get `-zk1` (Chinese double-byte support, so a GBK
-trail byte of 0x5C is not taken as a backslash). See `win16dev/chat/`.
+trail byte of 0x5C is not taken as a backslash). See `win16dev/hello/`.

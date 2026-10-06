@@ -5,7 +5,7 @@
  * Enter sends, Ctrl+Enter inserts a line break. Text on the wire is GBK,
  * base64-encoded, one command per line (see w16chatd for the protocol).
  *
- * This file is UTF-8; the Makefile (GBK = 1) converts it before compiling.
+ * Replies arrive as GBK, so Chinese shows up fine on Chinese Windows.
  */
 #include <windows.h>
 #include <string.h>
@@ -126,7 +126,7 @@ static void Status(const char *s)
 static void SetBusy(BOOL b)
 {
     busy = b;
-    SetWindowText(hwndSend, b ? "停止" : "发送");
+    SetWindowText(hwndSend, b ? "Stop" : "Send");
 }
 
 static void DoSend(void)
@@ -135,7 +135,7 @@ static void DoSend(void)
     static char line[INMAX * 4 / 3 + 16];
     int n;
 
-    if (busy) {                         /* button is "停止" */
+    if (busy) {                         /* button is "Stop" */
         SendLine("STOP");
         Status("Stopping...");
         return;
@@ -145,7 +145,7 @@ static void DoSend(void)
         return;
     if (GetWindowTextLength(hwndLog) > 0)
         Append("\r\n");
-    Append("我: ");
+    Append("Me: ");
     Append(text);
     Append("\r\n");
     lstrcpy(line, "MSG ");
@@ -280,9 +280,9 @@ static void Create(HWND hwnd)
     hwndInput = CreateWindow("EDIT", "", WS_CHILD | WS_VISIBLE | WS_BORDER |
                              WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL,
                              0, 0, 0, 0, hwnd, (HMENU)IDC_INPUT, hInst, NULL);
-    hwndSend = CreateWindow("BUTTON", "发送", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+    hwndSend = CreateWindow("BUTTON", "Send", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                             0, 0, 0, 0, hwnd, (HMENU)IDC_SEND, hInst, NULL);
-    hwndNew = CreateWindow("BUTTON", "新对话", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+    hwndNew = CreateWindow("BUTTON", "New", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                            0, 0, 0, 0, hwnd, (HMENU)IDC_NEW, hInst, NULL);
     hwndStatus = CreateWindow("STATIC", "", WS_CHILD | WS_VISIBLE | SS_LEFT,
                               0, 0, 0, 0, hwnd, (HMENU)IDC_STATUS, hInst, NULL);

@@ -1,3 +1,4 @@
+/* UTF-8 source with Chinese text: built with GBK = 1 (see Makefile) */
 #include <windows.h>
 
 static char szClass[] = "HelloWin16";
@@ -12,8 +13,8 @@ LRESULT CALLBACK _export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
     case WM_PAINT:
         hdc = BeginPaint(hwnd, &ps);
         GetClientRect(hwnd, &rc);
-        DrawText(hdc, "Hello, Windows 3.1!", -1, &rc,
-                 DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+        DrawText(hdc, "Hello, Windows 3.x!\n你好，Windows！", -1, &rc,
+                 DT_CENTER | DT_WORDBREAK);
         EndPaint(hwnd, &ps);
         return 0;
     case WM_LBUTTONDOWN:
