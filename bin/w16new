@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# w16new NAME [DIR] — create a Win16 project from ~/win16dev/template
+# NAME becomes the exe/module name (max 8 chars, letters/digits).
+set -euo pipefail
+TPL=${W16_TEMPLATE:-$HOME/win16dev/template}
+name=${1:-}
+[[ $name =~ ^[A-Za-z][A-Za-z0-9_]{0,7}$ ]] || { echo "usage: w16new NAME [DIR]   (NAME: 1-8 chars, DOS-safe)" >&2; exit 1; }
+name=${name,,}
+dir=${2:-$HOME/win16dev/$name}
+[[ -e $dir ]] && { echo "w16new: $dir already exists" >&2; exit 1; }
+mkdir -p "$dir"
+cp "$TPL/app.c" "$dir/$name.c"
+cp "$TPL/app.ico" "$dir/$name.ico"
+cp "$TPL/resource.h" "$dir/"
+sed "s/\"app.ico\"/\"$name.ico\"/; s/App 1.0/${name^} 1.0/" "$TPL/app.rc" > "$dir/$name.rc"
+sed -i "s/\"W16App\"/\"${name^}Class\"/; s/\"App\"/\"${name^}\"/" "$dir/$name.c"
+printf 'NAME = %s\ninclude $(HOME)/win16dev/w16.mk\n' "$name" > "$dir/Makefile"
+printf '*.obj\n*.res\n*.err\n*.map\n%s.exe\nw16run.png\n' "$name" > "$dir/.gitignore"
+echo "created $dir"
+echo "  cd $dir && make run"

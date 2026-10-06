@@ -1,0 +1,220 @@
+#!/usr/bin/env python3
+"""w16chatd — bridge CHAT.EXE in the Win3.x VM (COM2) to the local pi coding agent.
+
+  w16chatd [--cwd DIR] [-- extra pi args...]
+
+Connects to ~/win31/com2.sock (QEMU -serial unix:com2.sock,server) and keeps
+reconnecting across VM restarts. Each chat message runs
+  pi -p --mode json --session-id <conversation id> <message>
+in DIR (default ~/w16chat), streaming the reply back to the window.
+
+Line protocol over the serial port (CRLF, payloads are base64 of GBK text):
+  Windows -> Linux:  HELLO | MSG <b64> | NEW | STOP
+  Linux -> Windows:  B (reply begins) | T <b64> (text) | E (reply ends)
+                     S <b64> (status line) | X <b64> (error)
+                     I <b64 "agent|model"> (shown in the window title)
+"""
+import asyncio, base64, json, os, sys, time, uuid
+
+AGENT = "Pi"
+
+W31 = os.environ.get("W31_DIR", os.path.expanduser("~/win31"))
+SOCK = os.path.join(W31, "com2.sock")
+CHUNK = 120                      # max GBK bytes per T line
+SYSTEM = (
+    "You are chatting with a user through a small chat window running on "
+    "Windows 3.2 (Simplified Chinese) inside an emulator; messages travel over "
+    "a serial line. The window shows plain GBK text only: no Markdown "
+    "rendering, no emoji, no box-drawing tables. Keep replies short and use "
+    "plain text. Reply in the user's language."
+)
+
+
+def log(*a):
+    print(time.strftime("%H:%M:%S"), *a, file=sys.stderr, flush=True)
+
+
+def default_model(pi_args):
+    if "--model" in pi_args and pi_args.index("--model") + 1 < len(pi_args):
+        return pi_args[pi_args.index("--model") + 1]
+    try:
+        with open(os.path.expanduser("~/.pi/agent/settings.json")) as f:
+            return json.load(f).get("defaultModel") or "default"
+    except (OSError, ValueError):
+        return "default"
+
+
+def gbk(s):
+    s = s.replace("\r\n", "\n").replace("\n", "\r\n")
+    return s.encode("gbk", errors="ignore")      # emoji etc. have no GBK form
+
+
+class Bridge:
+    def __init__(self, cwd, pi_args):
+        self.cwd, self.pi_args = cwd, pi_args
+        self.session = str(uuid.uuid4())
+        self.proc = None
+        self.writer = None
+        self.model = default_model(pi_args)
+
+    async def send_info(self):
+        await self.send("I", f"{AGENT}|{self.model}")
+
+    async def send(self, cmd, text=None):
+        if not self.writer:
+            return
+        if text is None:
+            line = cmd
+        else:
+            line = f"{cmd} {base64.b64encode(gbk(text) if isinstance(text, str) else text).decode()}"
+        self.writer.write(line.encode() + b"\r\n")
+        await self.writer.drain()
+
+    async def send_text(self, s):
+        # split on character boundaries so no GBK double-byte char is cut
+        buf = b""
+        for ch in s.replace("\r\n", "\n"):
+            b = gbk(ch)
+            if len(buf) + len(b) > CHUNK:
+                await self.send("T", buf)
+                buf = b""
+                await asyncio.sleep(0.02)   # let the Win16 side drain its queue
+            buf += b
+        if buf:
+            await self.send("T", buf)
+
+    async def run_pi(self, text):
+        cmd = ["pi", "-p", "--mode", "json", "--session-id", self.session,
+               "--append-system-prompt", SYSTEM, *self.pi_args, "--", text]
+        log("pi:", text[:60].replace("\n", " "))
+        await self.send("S", "Thinking...")
+        await self.send("B")
+        try:
+            self.proc = await asyncio.create_subprocess_exec(
+                *cmd, cwd=self.cwd, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL, limit=16 * 1024 * 1024)
+            in_text = False
+            async for raw in self.proc.stdout:
+                try:
+                    ev = json.loads(raw)
+                except ValueError:
+                    continue
+                t = ev.get("type")
+                ae = ev.get("assistantMessageEvent") or {}
+                msg = ev.get("message") or {}
+                if t == "message_start" and msg.get("role") == "assistant" \
+                        and msg.get("model") and msg["model"] != self.model:
+                    self.model = msg["model"]
+                    await self.send_info()
+                at = ae.get("type")
+                if at == "text_delta":
+                    if not in_text:
+                        in_text = True
+                        await self.send("S", "Replying...")
+                    await self.send_text(ae.get("delta", ""))
+                elif at == "thinking_start":
+                    await self.send("S", "Thinking...")
+                elif t == "tool_execution_start":
+                    args = ev.get("args") or {}
+                    detail = args.get("command") or args.get("path") or ""
+                    status = f"Running {ev.get('toolName')}: {detail}"[:70]
+                    await self.send("S", status)
+                    if in_text:
+                        await self.send_text("\n")
+                    await self.send_text(f"[{status}]\n")
+                    in_text = False
+                elif t == "turn_end" and in_text:
+                    await self.send_text("\n")
+                    in_text = False
+            rc = await self.proc.wait()
+            if rc not in (0, None) and rc > 0:
+                await self.send("X", f"pi exited with code {rc}")
+        except FileNotFoundError:
+            await self.send("X", "pi command not found")
+        except asyncio.CancelledError:
+            if self.proc and self.proc.returncode is None:
+                self.proc.terminate()
+            await self.send_text("\n[stopped]\n")
+        finally:
+            self.proc = None
+            await self.send("E")
+            await self.send("S", "Ready")
+
+    async def session_loop(self, reader):
+        task = None
+        await self.send_info()
+        await self.send("S", "Connected, ready")
+        while True:
+            line = await reader.readline()
+            if not line:
+                break
+            line = line.decode("latin-1").strip()
+            if not line:
+                continue
+            cmd, _, arg = line.partition(" ")
+            if cmd == "HELLO":
+                await self.send_info()
+                await self.send("S", "Connected, ready" if not task or task.done() else "Replying...")
+            elif cmd == "MSG":
+                try:
+                    text = base64.b64decode(arg).decode("gbk", errors="replace")
+                except ValueError:
+                    await self.send("X", "bad message")
+                    continue
+                if task and not task.done():
+                    await self.send("X", "still busy with the previous message (press Stop)")
+                    continue
+                task = asyncio.create_task(self.run_pi(text))
+            elif cmd == "STOP":
+                if task and not task.done():
+                    task.cancel()
+                else:                       # window thinks it is busy: unstick it
+                    await self.send("E")
+                    await self.send("S", "Ready")
+            elif cmd == "NEW":
+                if task and not task.done():
+                    task.cancel()
+                self.session = str(uuid.uuid4())
+                log("new session", self.session)
+                await self.send("S", "New conversation")
+        if task and not task.done():
+            task.cancel()
+
+    async def serve(self):
+        while True:
+            try:
+                reader, self.writer = await asyncio.open_unix_connection(SOCK)
+            except OSError:
+                await asyncio.sleep(2)
+                continue
+            log("connected", SOCK)
+            try:
+                await self.session_loop(reader)
+            except (ConnectionError, OSError) as e:
+                log("connection lost:", e)
+            self.writer = None
+            log("disconnected")
+            await asyncio.sleep(1)
+
+
+def main():
+    args = sys.argv[1:]
+    cwd = os.path.expanduser("~/w16chat")
+    pi_args = []
+    if "--" in args:
+        i = args.index("--")
+        args, pi_args = args[:i], args[i + 1:]
+    if args[:1] == ["--cwd"] and len(args) >= 2:
+        cwd = os.path.expanduser(args[1])
+    elif args:
+        print(__doc__.strip())
+        sys.exit(1)
+    os.makedirs(cwd, exist_ok=True)
+    log(f"w16chatd: socket {SOCK}, pi cwd {cwd}, extra args {pi_args}")
+    try:
+        asyncio.run(Bridge(cwd, pi_args).serve())
+    except KeyboardInterrupt:
+        pass
+
+
+main()

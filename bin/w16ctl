@@ -1,0 +1,208 @@
+#!/usr/bin/env python3
+"""w16ctl — talk to W16AGENT.EXE in the Win3.1 VM over COM1.
+
+File transfer (over the serial line, no floppy needed):
+  w16ctl put LOCAL [REMOTE]       Linux -> Windows (default C:\\W16RUN\\<8.3 name>;
+                                  REMOTE ending in \\ is a directory)
+  w16ctl put -d DIR LOCAL...      several files into DIR
+  w16ctl get REMOTE [LOCAL]       Windows -> Linux (LOCAL may be a directory)
+  w16ctl ls [PATTERN]             list files (default C:\\W16RUN\\*.*)
+  w16ctl rm REMOTE... / mkdir DIR
+
+Raw agent commands (reply printed; exit 1 on ERR or timeout):
+  w16ctl PING | VERSION | TASKS | RUN A:\\APP.EXE [args] | EXEC cmdline
+         CLOSE module | COPY src dst | INI file section key value
+         EXIT | RESTART | UPDATE A:\\W16AGENT.EXE
+"""
+import base64, os, re, socket, sys, time, zlib
+
+SOCK = os.path.join(os.environ.get("W31_DIR", os.path.expanduser("~/win31")), "com1.sock")
+TIMEOUT = float(os.environ.get("W16CTL_TIMEOUT", "10"))
+CHUNK = 240
+DEFAULT_DIR = "C:\\W16RUN"
+
+
+class AgentError(Exception):
+    pass
+
+
+class Agent:
+    def __init__(self):
+        self.s = socket.socket(socket.AF_UNIX)
+        try:
+            self.s.connect(SOCK)
+        except OSError as e:
+            raise AgentError(f"cannot connect {SOCK}: {e} (VM running?)")
+        self.buf = b""
+        self.s.settimeout(0.2)
+        try:                                    # drop stale output
+            while self.s.recv(65536):
+                pass
+        except (socket.timeout, BlockingIOError):
+            pass
+
+    def send(self, line):
+        self.s.sendall(line.encode("latin-1") + b"\r\n")
+
+    def recv(self, timeout=TIMEOUT):
+        end = time.time() + timeout
+        while True:
+            m = re.search(rb"[\r\n]", self.buf)
+            if m:
+                line, self.buf = self.buf[:m.start()], self.buf[m.end():]
+                line = line.decode("latin-1").strip()
+                if line and line != "OK agent started":
+                    return line
+                continue
+            if time.time() >= end:
+                raise AgentError(f"no reply within {timeout:g}s (is W16AGENT running?)")
+            try:
+                chunk = self.s.recv(65536)
+            except socket.timeout:
+                continue
+            if not chunk:
+                raise AgentError("connection closed")
+            self.buf += chunk
+
+    def call(self, line, timeout=TIMEOUT):
+        self.send(line)
+        r = self.recv(timeout)
+        if r.startswith("ERR"):
+            raise AgentError(r)
+        return r
+
+
+def dos83(name):
+    b = os.path.basename(name)
+    ext = ""
+    if "." in b and not b.startswith("."):
+        b, ext = b.rsplit(".", 1)
+    b = re.sub(r"[^A-Za-z0-9_$~!#%&@^()-]", "", b)[:8] or "FILE"
+    ext = re.sub(r"[^A-Za-z0-9_]", "", ext)[:3]
+    return (b + ("." + ext if ext else "")).upper()
+
+
+def progress(label, done, total, t0):
+    if not sys.stderr.isatty():
+        return
+    rate = done / max(time.time() - t0, 1e-6) / 1024
+    pct = 100 * done // total if total else 100
+    sys.stderr.write(f"\r{label}: {done}/{total} bytes {pct:3d}% {rate:6.1f} KB/s ")
+    sys.stderr.flush()
+
+
+def put(agent, local, remote):
+    data = open(local, "rb").read()
+    agent.call(f"PUT {remote} {len(data)}")
+    t0 = time.time()
+    for i in range(0, len(data), CHUNK):
+        agent.send("D " + base64.b64encode(data[i:i + CHUNK]).decode())
+        r = agent.recv()
+        if r != "K":
+            raise AgentError(r)
+        progress(remote, i + len(data[i:i + CHUNK]), len(data), t0)
+    r = agent.call(f"END {zlib.crc32(data):08x}", timeout=30)
+    if sys.stderr.isatty():
+        sys.stderr.write("\n")
+    dt = time.time() - t0
+    print(f"{local} -> {remote} ({len(data)} bytes, {len(data) / max(dt, 1e-6) / 1024:.1f} KB/s)")
+    return r
+
+
+def get(agent, remote, local):
+    r = agent.call(f"GET {remote}")
+    size = int(r.split()[1])
+    out, t0 = bytearray(), time.time()
+    while True:
+        line = agent.recv()
+        if line.startswith("D "):
+            out += base64.b64decode(line[2:])
+            agent.send("K")
+            progress(remote, len(out), size, t0)
+        elif line.startswith("END "):
+            crc = int(line[4:], 16)
+            break
+        else:
+            raise AgentError(line)
+    if sys.stderr.isatty():
+        sys.stderr.write("\n")
+    if len(out) != size or zlib.crc32(out) != crc:
+        raise AgentError(f"transfer corrupted ({len(out)}/{size} bytes, crc mismatch)")
+    with open(local, "wb") as f:
+        f.write(out)
+    dt = time.time() - t0
+    print(f"{remote} -> {local} ({size} bytes, {size / max(dt, 1e-6) / 1024:.1f} KB/s)")
+
+
+def remote_path(local, remote):
+    if not remote:
+        return f"{DEFAULT_DIR}\\{dos83(local)}"
+    if remote.endswith("\\"):
+        return remote + dos83(local)
+    return remote
+
+
+def cmd_put(agent, args):
+    if args[:1] == ["-d"] and len(args) >= 3:
+        d = args[1].rstrip("\\") + "\\"
+        for f in args[2:]:
+            put(agent, f, d + dos83(f))
+    elif len(args) in (1, 2):
+        put(agent, args[0], remote_path(args[0], args[1] if len(args) > 1 else None))
+    else:
+        usage()
+
+
+def cmd_get(agent, args):
+    if len(args) not in (1, 2):
+        usage()
+    remote = args[0]
+    if "\\" not in remote and ":" not in remote:
+        remote = f"{DEFAULT_DIR}\\{remote}"
+    name = remote.replace("/", "\\").rsplit("\\", 1)[-1].rsplit(":", 1)[-1]
+    local = args[1] if len(args) > 1 else name
+    if os.path.isdir(local):
+        local = os.path.join(local, name)
+    get(agent, remote, local)
+
+
+def cmd_ls(agent, args):
+    pat = args[0] if args else f"{DEFAULT_DIR}\\*.*"
+    if not re.search(r"[*?]", pat):
+        pat = pat.rstrip("\\") + "\\*.*"
+    agent.call(f"DIR {pat}")
+    while (line := agent.recv()) != "END":
+        _, name, size = line.split(" ", 2)
+        print(f"{name:<13} {size:>10}")
+
+
+def usage():
+    print(__doc__.strip())
+    sys.exit(1)
+
+
+def main():
+    a = sys.argv[1:]
+    if not a or a[0] in ("-h", "--help", "help"):
+        usage()
+    try:
+        agent = Agent()
+        sub, rest = a[0], a[1:]
+        if sub == "put":
+            cmd_put(agent, rest)
+        elif sub == "get":
+            cmd_get(agent, rest)
+        elif sub == "ls":
+            cmd_ls(agent, rest)
+        elif sub == "rm" and rest:
+            for r in rest:
+                print(agent.call(f"DEL {r}"))
+        elif sub == "mkdir" and len(rest) == 1:
+            print(agent.call(f"MKDIR {rest[0]}"))
+        else:
+            print(agent.call(" ".join(a)))
+    except AgentError as e:
+        sys.exit(f"w16ctl: {e}")
+
+
+main()

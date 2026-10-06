@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# dosrun — copy a DOS exe into the Windows 3.1 VM, run it, screenshot, quit it.
+#
+#   dosrun [-w SECS] [-o SHOT.png] [-k] [-q "KEYS"] PROG.EXE [args...]
+#
+#   -w SECS   wait before the screenshot (default 5)
+#   -o FILE   screenshot path (default dosrun.png)
+#   -k        keep it running (don't send quit keys)
+#   -q KEYS   QEMU sendkey names to quit it (default "esc"), e.g. "esc y"
+#
+# DOS4GW.EXE next to PROG.EXE is copied too. Files go A: -> C:\W16RUN (via
+# W16AGENT), then a generated DOSRUN.BAT runs it there (full screen).
+set -euo pipefail
+
+W31=${W31_DIR:-$HOME/win31}
+SOCK=$W31/qemu-monitor.sock
+WAIT=5 SHOT=dosrun.png KEEP=0 QUIT=esc
+
+usage() { sed -n '2,12s/^# \{0,1\}//p' "$0"; exit 1; }
+while getopts "w:o:kq:h" opt; do
+    case $opt in
+    w) WAIT=$OPTARG ;; o) SHOT=$OPTARG ;; k) KEEP=1 ;; q) QUIT=$OPTARG ;; *) usage ;;
+    esac
+done
+shift $((OPTIND - 1))
+(( $# )) || usage
+EXE=$1; shift
+[[ -f $EXE ]] || { echo "dosrun: $EXE not found" >&2; exit 1; }
+
+mon() { printf '%s\n' "$1" | socat -t1 - "UNIX-CONNECT:$SOCK" >/dev/null 2>&1; }
+mon "info status" || { echo "dosrun: VM not running (start ~/win31/run.sh)" >&2; exit 1; }
+
+files=("$EXE")
+[[ -f $(dirname "$EXE")/DOS4GW.EXE ]] && files+=("$(dirname "$EXE")/DOS4GW.EXE")
+tmpd=$(mktemp -d)
+printf '@ECHO OFF\r\nC:\r\nCD \\W16RUN\r\n%s%s\r\n' "$(basename "${EXE^^}")" "${*:+ $*}" > "$tmpd/DOSRUN.BAT"
+out=$(w31x put "${files[@]}" "$tmpd/DOSRUN.BAT")
+rm -rf "$tmpd"
+
+# run from C: — DOS sessions reading the floppy hit Windows' DMA buffer limits
+while read -r line; do
+    n=${line##*A:\\}
+    w16ctl COPY "A:\\$n" "C:\\W16RUN\\$n" >/dev/null
+done <<<"$out"
+w16ctl EXEC 'C:\W16RUN\DOSRUN.BAT'
+sleep "$WAIT"
+tmp=$(mktemp --suffix=.ppm)
+mon "screendump $tmp"; sleep 0.5
+magick "$tmp" "$SHOT"; rm -f "$tmp"
+echo "screenshot: $SHOT"
+
+if (( ! KEEP )); then
+    for k in $QUIT; do mon "sendkey $k"; sleep 0.5; done
+    echo "sent quit keys: $QUIT"
+fi

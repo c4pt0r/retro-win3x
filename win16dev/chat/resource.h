@@ -1,0 +1,6 @@
+#define IDI_CHAT    1
+#define IDC_LOG     101
+#define IDC_INPUT   102
+#define IDC_SEND    103
+#define IDC_NEW     104
+#define IDC_STATUS  105

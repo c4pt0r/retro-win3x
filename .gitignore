@@ -1,0 +1,19 @@
+# VM images (built locally by vm/build-images.sh) and runtime state
+vm/images/
+vm/disks/
+vm/downloads/
+vm/exchange.img
+vm/*.sock
+vm/*.log
+
+# build outputs
+*.obj
+*.res
+*.err
+*.map
+*.exe
+*.EXE
+gbk/
+w16run.png
+dosrun.png
+__pycache__/

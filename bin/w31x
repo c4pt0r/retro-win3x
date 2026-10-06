@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# w31x — exchange files between Linux and the Windows 3.1 QEMU VM.
+#
+# The VM sees ~/win31/exchange.img as floppy drive A:. While the VM is running,
+# each command ejects the floppy via the QEMU monitor, edits the image with
+# mtools, then re-inserts it, so Linux and DOS never write the image at the
+# same time. In Windows press F5 in File Manager to see changes.
+set -euo pipefail
+
+W31=${W31_DIR:-$HOME/win31}
+IMG=$W31/exchange.img
+SOCK=$W31/qemu-monitor.sock
+DRIVE=floppy0
+export MTOOLS_SKIP_CHECK=1
+
+usage() {
+    cat <<EOF
+usage: w31x <command> [args]
+
+  put FILE...          copy Linux files to A:\\ (overwrites)
+  get NAME... [DIR]    copy A:\\NAME to DIR (default .); wildcards OK: '*.TXT'
+  ls                   list A:\\
+  rm NAME...           delete files from A:\\
+  wipe                 erase everything on A:
+  init                 create a blank 2.88MB floppy image (if missing)
+
+Names on A: are DOS 8.3 uppercase; longer Linux names are truncated
+(readme_from_linux.txt -> README_F.TXT).
+EOF
+}
+
+monitor() {
+    printf '%s\n' "$1" | socat -t1 - "UNIX-CONNECT:$SOCK" >/dev/null 2>&1
+}
+
+vm_online() {
+    [[ -S $SOCK ]] && monitor "info status"
+}
+
+ONLINE=0
+eject() {
+    if vm_online; then
+        ONLINE=1
+        monitor "eject -f $DRIVE"
+        trap insert EXIT
+    fi
+}
+insert() {
+    if (( ONLINE )); then
+        monitor "change $DRIVE $IMG raw"
+        ONLINE=0
+    fi
+}
+
+need_img() {
+    [[ -f $IMG ]] || { echo "w31x: $IMG not found, run 'w31x init'" >&2; exit 1; }
+}
+
+# Linux filename -> DOS 8.3 uppercase (e.g. readme_from_linux.txt -> README_F.TXT)
+dos83() {
+    local b=${1##*/} ext=
+    [[ $b == *.* && $b != .* ]] && { ext=${b##*.}; b=${b%.*}; }
+    b=$(tr -cd 'A-Za-z0-9_$~!#%&@^()-' <<<"$b"); ext=$(tr -cd 'A-Za-z0-9_' <<<"$ext")
+    b=${b:0:8}; ext=${ext:0:3}
+    [[ -n $b ]] || b=FILE
+    b=${b^^}; ext=${ext^^}
+    echo "$b${ext:+.$ext}"
+}
+
+dosname() {
+    local n=${1^^}
+    [[ $n == ::* ]] && echo "$n" || echo "::/$n"
+}
+
+cmd=${1:-}
+shift || true
+case $cmd in
+init)
+    if [[ -f $IMG ]]; then echo "$IMG already exists"; exit 0; fi
+    mformat -i "$IMG" -C -f 2880 -v EXCHANGE ::
+    echo "created $IMG"
+    ;;
+put)
+    (( $# )) || { usage; exit 1; }
+    need_img; eject
+    for f in "$@"; do
+        n=$(dos83 "$f")
+        mcopy -i "$IMG" -o -D o "$f" "::/$n"
+        echo "$f -> A:\\$n"
+    done
+    ;;
+get)
+    (( $# )) || { usage; exit 1; }
+    need_img
+    dest=.
+    if (( $# > 1 )) && [[ -d ${@: -1} ]]; then dest=${@: -1}; set -- "${@:1:$#-1}"; fi
+    eject
+    for n in "$@"; do
+        mcopy -i "$IMG" -n -D o "$(dosname "$n")" "$dest"/
+    done
+    ;;
+ls|dir)
+    need_img; eject
+    mdir -i "$IMG" ::/
+    ;;
+rm|del)
+    (( $# )) || { usage; exit 1; }
+    need_img; eject
+    for n in "$@"; do mdel -i "$IMG" "$(dosname "$n")"; done
+    ;;
+wipe)
+    need_img; eject
+    mformat -i "$IMG" -f 2880 -v EXCHANGE ::
+    echo "A: wiped"
+    ;;
+-h|--help|help|"")
+    usage
+    ;;
+*)
+    echo "w31x: unknown command '$cmd'" >&2; usage; exit 1
+    ;;
+esac

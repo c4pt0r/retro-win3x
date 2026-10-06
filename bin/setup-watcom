@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# setup-watcom — download the Open Watcom v2 snapshot into ~/opt/watcom
+# (the Makefiles in win16dev/ and dosdev/ expect it there; override with WATCOM=...)
+set -euo pipefail
+DEST=${WATCOM:-$HOME/opt/watcom}
+URL=https://github.com/open-watcom/open-watcom-v2/releases/download/Current-build/ow-snapshot.tar.xz
+if [[ -x $DEST/binl64/wcc ]]; then echo "Open Watcom already in $DEST"; exit 0; fi
+mkdir -p "$DEST"
+echo "downloading $URL ..."
+curl -fL "$URL" | tar xJ -C "$DEST"
+echo "installed to $DEST"
