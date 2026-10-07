@@ -1,6 +1,6 @@
-# retro-win3x — Windows 3.x / DOS cross-development on Linux
+# retro-win3x — Windows 3.x / DOS cross-development on Linux and macOS
 
-Cross-compile Win16 and DOS programs on Linux with Open Watcom, run them in
+Cross-compile Win16 and DOS programs on Linux or macOS with Open Watcom, run them in
 Windows 3.2 (Simplified Chinese) or Windows 3.1 under QEMU, and talk to the
 guest over serial lines: a control agent, file transfer, and a chat window
 connected to a local LLM coding agent ([pi](https://github.com/badlogic/pi-mono)).
@@ -31,6 +31,13 @@ ln -s "$PWD/vm" ~/win31; ln -s "$PWD/win16dev" ~/win16dev; ln -s "$PWD/dosdev" ~
 for f in bin/*; do ln -s "$PWD/$f" ~/.local/bin/; done
 vm/run.sh
 ```
+On macOS (Intel or Apple Silicon), install the tools with Homebrew instead:
+```bash
+brew install qemu mtools socat imagemagick bash
+```
+The scripts need bash 4+ (`/bin/bash` on macOS is 3.2), so make sure Homebrew's `bash` comes first
+in `PATH`. Also make sure `~/.local/bin` is in `PATH`. `vm/run.sh` uses QEMU's Cocoa display on macOS.
+
 The chat window also needs the [pi](https://github.com/badlogic/pi-mono) coding agent installed locally.
 
 **No operating system images are included in this repository.** `build-images.sh` downloads them from
