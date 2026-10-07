@@ -1,0 +1,27 @@
+#include <windows.h>
+#include "resource.h"
+
+IDI_APP ICON "clock.ico"
+
+IDM_MAIN MENU
+BEGIN
+    POPUP "文件"
+    BEGIN
+        MENUITEM "退出",        IDM_EXIT
+    END
+    POPUP "帮助"
+    BEGIN
+        MENUITEM "关于...",     IDM_ABOUT
+    END
+END
+
+IDD_ABOUT DIALOG 20, 20, 180, 76
+STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "关于时钟"
+FONT 9, "宋体"
+BEGIN
+    ICON            IDI_APP, -1, 10, 10, 18, 20
+    LTEXT           "时钟 1.0", -1, 40, 10, 130, 8
+    LTEXT           "在 Linux 上用 Open Watcom 交叉编译，运行于简体中文 Windows 3.2", -1, 40, 24, 130, 30
+    DEFPUSHBUTTON   "确定", IDOK, 65, 54, 50, 14
+END

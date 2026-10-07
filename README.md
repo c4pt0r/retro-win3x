@@ -17,7 +17,7 @@ connected to a local LLM coding agent ([pi](https://github.com/badlogic/pi-mono)
 | `vm/disks/` | This machine's working disks (not in the repo): created on first run as overlays on the base images; delete one to reset that VM |
 | `vm/tools/mon.sh` | QEMU monitor helpers (`mon`, `typ`, `shot`) for debugging |
 | `bin/` | Host commands: `w31x` `w16ctl` `w16run` `dosrun` `w16new` `w16chatd` `setup-watcom` |
-| `win16dev/` | Win16: shared rules `w16.mk`, `template/`, examples `hello/` and `demo/`, LLM chat window `chat/`, in-VM agent `tools/w16agent`, `tools/exitwin` |
+| `win16dev/` | Win16: shared rules `w16.mk`, `template/`, examples `hello/`, `demo/` and `clock/` (a Chinese-UI clock written by pi through the chat window), LLM chat window `chat/`, in-VM agent `tools/w16agent`, `tools/exitwin` |
 | `dosdev/` | DOS: shared rules `dos.mk`, `tui/` text-mode UI demo (16-bit), `snake/` 320×200 snake game (32-bit DOS/4GW) |
 | `docs/` | Screenshots |
 
