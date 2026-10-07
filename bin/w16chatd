@@ -9,10 +9,11 @@ reconnecting across VM restarts. Each chat message runs
 in DIR (default ~/w16chat), streaming the reply back to the window.
 
 Line protocol over the serial port (CRLF, payloads are base64 of GBK text):
-  Windows -> Linux:  HELLO | MSG <b64> | NEW | STOP
-  Linux -> Windows:  B (reply begins) | T <b64> (text) | E (reply ends)
+  Windows -> Linux:  HELLO | MSG <b64> | NEW | SWITCH <index> | STOP
+  Linux -> Windows:  B (reply begins) | T <b64> (text) | C (clear transcript)
+                     E (reply ends) | L <b64 list> (session names)
                      S <b64> (status line) | X <b64> (error)
-                     I <b64 "agent|model"> (shown in the window title)
+                     I <b64 "agent|model"> | V <b64 "current/total">
 """
 import asyncio, base64, json, os, sys, time, uuid
 
@@ -52,13 +53,36 @@ def gbk(s):
 class Bridge:
     def __init__(self, cwd, pi_args):
         self.cwd, self.pi_args = cwd, pi_args
-        self.session = str(uuid.uuid4())
+        initial_id = os.environ.get("W16CHAT_SESSION_ID") or str(uuid.uuid4())
+        self.sessions = [{"id": initial_id, "history": ""}]
+        self.session_index = 0
         self.proc = None
         self.writer = None
         self.model = default_model(pi_args)
 
+    def current_session(self):
+        return self.sessions[self.session_index]
+
+    @staticmethod
+    def record(session, text):
+        history = session["history"] + text
+        if len(history) > 24000:
+            cut = history.find("\n", 8000)
+            if cut >= 0:
+                history = history[cut + 1:]
+        session["history"] = history
+
     async def send_info(self):
         await self.send("I", f"{AGENT}|{self.model}")
+        await self.send_session_list()
+        await self.send_session_position()
+
+    async def send_session_list(self):
+        labels = "\n".join(f"会话 {i + 1}" for i in range(len(self.sessions)))
+        await self.send("L", labels)
+
+    async def send_session_position(self):
+        await self.send("V", f"{self.session_index + 1}/{len(self.sessions)}")
 
     async def send(self, cmd, text=None):
         if not self.writer:
@@ -83,11 +107,12 @@ class Bridge:
         if buf:
             await self.send("T", buf)
 
-    async def run_pi(self, text):
-        cmd = ["pi", "-p", "--mode", "json", "--session-id", self.session,
+    async def run_pi(self, text, session):
+        cmd = ["pi", "-p", "--mode", "json", "--session-id", session["id"],
                "--append-system-prompt", SYSTEM, *self.pi_args, "--", text]
         log("pi:", text[:60].replace("\n", " "))
         await self.send("S", "Thinking...")
+        self.record(session, f"\n{AGENT}: ")
         await self.send("B")
         try:
             self.proc = await asyncio.create_subprocess_exec(
@@ -111,7 +136,9 @@ class Bridge:
                     if not in_text:
                         in_text = True
                         await self.send("S", "Replying...")
-                    await self.send_text(ae.get("delta", ""))
+                    delta = ae.get("delta", "")
+                    self.record(session, delta)
+                    await self.send_text(delta)
                 elif at == "thinking_start":
                     await self.send("S", "Thinking...")
                 elif t == "tool_execution_start":
@@ -120,28 +147,48 @@ class Bridge:
                     status = f"Running {ev.get('toolName')}: {detail}"[:70]
                     await self.send("S", status)
                     if in_text:
+                        self.record(session, "\n")
                         await self.send_text("\n")
-                    await self.send_text(f"[{status}]\n")
+                    tool_text = f"[{status}]\n"
+                    self.record(session, tool_text)
+                    await self.send_text(tool_text)
                     in_text = False
                 elif t == "turn_end" and in_text:
+                    self.record(session, "\n")
                     await self.send_text("\n")
                     in_text = False
             rc = await self.proc.wait()
             if rc not in (0, None) and rc > 0:
+                self.record(session, f"\n[Error] pi exited with code {rc}\n")
                 await self.send("X", f"pi exited with code {rc}")
         except FileNotFoundError:
+            self.record(session, "\n[Error] pi command not found\n")
             await self.send("X", "pi command not found")
         except asyncio.CancelledError:
             if self.proc and self.proc.returncode is None:
                 self.proc.terminate()
-            await self.send_text("\n[stopped]\n")
+            stopped = "\n[stopped]\n"
+            self.record(session, stopped)
+            await self.send_text(stopped)
         finally:
             self.proc = None
+            self.record(session, "\n")
             await self.send("E")
             await self.send("S", "Ready")
 
     async def session_loop(self, reader):
         task = None
+
+        async def stop_active():
+            nonlocal task
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            task = None
+
         await self.send_info()
         await self.send("S", "Connected, ready")
         while True:
@@ -154,6 +201,8 @@ class Bridge:
             cmd, _, arg = line.partition(" ")
             if cmd == "HELLO":
                 await self.send_info()
+                await self.send("C")
+                await self.send_text(self.current_session()["history"])
                 await self.send("S", "Connected, ready" if not task or task.done() else "Replying...")
             elif cmd == "MSG":
                 try:
@@ -164,19 +213,45 @@ class Bridge:
                 if task and not task.done():
                     await self.send("X", "still busy with the previous message (press Stop)")
                     continue
-                task = asyncio.create_task(self.run_pi(text))
+                session = self.current_session()
+                prefix = "\n" if session["history"] else ""
+                self.record(session, f"{prefix}Me: {text}\n")
+                task = asyncio.create_task(self.run_pi(text, session))
             elif cmd == "STOP":
                 if task and not task.done():
                     task.cancel()
                 else:                       # window thinks it is busy: unstick it
                     await self.send("E")
                     await self.send("S", "Ready")
-            elif cmd == "NEW":
-                if task and not task.done():
-                    task.cancel()
-                self.session = str(uuid.uuid4())
-                log("new session", self.session)
-                await self.send("S", "New conversation")
+            elif cmd in ("SWITCH", "PREV", "NEXT", "NEW"):
+                if cmd == "SWITCH":
+                    try:
+                        target = int(arg)
+                    except ValueError:
+                        await self.send("X", "bad session index")
+                        continue
+                    if target < 0 or target >= len(self.sessions):
+                        await self.send("X", "session index out of range")
+                        continue
+                    if target == self.session_index:
+                        await self.send_session_position()
+                        continue
+                await stop_active()
+                if cmd == "NEW":
+                    self.sessions.append({"id": str(uuid.uuid4()), "history": ""})
+                    self.session_index = len(self.sessions) - 1
+                    log("new session", self.current_session()["id"])
+                elif cmd == "SWITCH":
+                    self.session_index = target
+                elif cmd == "PREV":
+                    self.session_index = max(0, self.session_index - 1)
+                else:
+                    self.session_index = min(len(self.sessions) - 1, self.session_index + 1)
+                await self.send("C")
+                await self.send_session_list()
+                await self.send_session_position()
+                await self.send_text(self.current_session()["history"])
+                await self.send("S", f"Session {self.session_index + 1}/{len(self.sessions)}")
         if task and not task.done():
             task.cancel()
 

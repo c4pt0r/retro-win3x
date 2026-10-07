@@ -4,3 +4,6 @@
 #define IDC_SEND    103
 #define IDC_NEW     104
 #define IDC_STATUS  105
+#define IDM_COPY    106
+#define IDM_PASTE   107
+#define IDC_SESSIONS 108

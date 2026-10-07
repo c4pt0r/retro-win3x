@@ -2,13 +2,14 @@
  * CHAT — "LLM" chat window for Windows 3.x that talks to the pi coding agent on the
  * Linux host through COM2 (QEMU: -serial unix:com2.sock; host side: w16chatd).
  *
- * Enter sends, Ctrl+Enter inserts a line break. Text on the wire is GBK,
- * base64-encoded, one command per line (see w16chatd for the protocol).
+ * Enter sends, Ctrl+Enter inserts a line break. Prev/Next switches sessions.
+ * Text on the wire is GBK, base64-encoded, one command per line (see w16chatd).
  *
  * Replies arrive as GBK, so Chinese shows up fine on Chinese Windows.
  */
 #include <windows.h>
 #include <string.h>
+#include <stdlib.h>
 #include "resource.h"
 
 #define PORT        "COM2"
@@ -18,18 +19,22 @@
 #define LOGTRIM     8000
 
 static HINSTANCE hInst;
-static HWND      hwndMain, hwndLog, hwndInput, hwndSend, hwndNew, hwndStatus;
-static FARPROC   lpfnOldInput, lpfnInput;
+static HWND      hwndMain, hwndLog, hwndInput, hwndSend, hwndNew, hwndSessions, hwndStatus;
+static HWND      hwndContext;
+static FARPROC   lpfnOldLog, lpfnOldInput, lpfnEdit;
 static int       cid = -1;
 static BOOL      busy;
 static int       lineH;
 static char      rx[RXMAX];
 static int       rxlen;
 static char      agent[32] = "LLM";
+static char      model[64] = "?";
+static char      sessionInfo[16] = "1/1";
 static char      pend[RXMAX];       /* reply text collected during one Poll() */
 static int       pendlen;
 static char      status[128];
 static HBRUSH    hbrFace;
+static HFONT     hfontChat;
 
 /* ---- base64 ---------------------------------------------------------- */
 
@@ -164,6 +169,51 @@ static void SetBusy(BOOL b)
     SetWindowText(hwndSend, b ? "Stop" : "Send");
 }
 
+static void UpdateTitle(void)
+{
+    char title[160];
+
+    wsprintf(title, "LLM - %s - %s [%s]",
+             (LPSTR)agent, (LPSTR)model, (LPSTR)sessionInfo);
+    SetWindowText(hwndMain, title);
+}
+
+static void SetSessionPosition(char *s)
+{
+    char *slash = strchr(s, '/');
+    int current = 1, total = 1;
+
+    if (slash) {
+        *slash++ = '\0';
+        current = atoi(s);
+        total = atoi(slash);
+    }
+    if (current < 1) current = 1;
+    if (total < 1) total = 1;
+    wsprintf(sessionInfo, "%d/%d", current, total);
+    UpdateTitle();
+    SendMessage(hwndSessions, LB_SETCURSEL, current - 1, 0L);
+}
+
+static void SetSessionList(char *s)
+{
+    char *p = s, *start;
+
+    SendMessage(hwndSessions, LB_RESETCONTENT, 0, 0L);
+    while (*p) {
+        start = p;
+        while (*p && *p != '\r' && *p != '\n')
+            p++;
+        if (*p) {
+            *p++ = '\0';
+            while (*p == '\r' || *p == '\n')
+                p++;
+        }
+        if (*start)
+            SendMessage(hwndSessions, LB_ADDSTRING, 0, (LPARAM)(LPSTR)start);
+    }
+}
+
 static void DoSend(void)
 {
     static char text[INMAX + 1];
@@ -222,18 +272,32 @@ static void HandleLine(char *s)
             Queue("\r\n");
         SetBusy(FALSE);
         break;
+    case 'C':                           /* clear transcript before session replay */
+        pendlen = 0;
+        SetWindowText(hwndLog, "");
+        SetBusy(FALSE);
+        SetFocus(hwndInput);
+        break;
+    case 'L':                           /* newline-separated session labels */
+        B64Decode(s + 2, text);
+        SetSessionList(text);
+        break;
     case 'I': {                         /* "agent|model" -> window title */
-        char title[160], *bar;
+        char *bar;
 
         B64Decode(s + 2, text);
         bar = strchr(text, '|');
         if (bar)
             *bar++ = '\0';
         lstrcpyn(agent, text, sizeof(agent));
-        wsprintf(title, "LLM - %s - %s", (LPSTR)agent, (LPSTR)(bar ? bar : "?"));
-        SetWindowText(hwndMain, title);
+        lstrcpyn(model, bar ? bar : "?", sizeof(model));
+        UpdateTitle();
         break;
     }
+    case 'V':                           /* current/total session number */
+        B64Decode(s + 2, text);
+        SetSessionPosition(text);
+        break;
     case 'S':
         B64Decode(s + 2, text);
         Status(text);
@@ -279,35 +343,74 @@ static void Poll(void)
     Flush();
 }
 
-/* ---- input box: Enter sends, Ctrl+Enter = new line ------------------- */
+/* ---- edit context menu: copy/paste ----------------------------------- */
 
-LRESULT CALLBACK _export InputProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+static void ShowEditMenu(HWND hwndEdit, LPARAM lParam)
 {
-    if (msg == WM_KEYDOWN && wParam == VK_RETURN) {
-        if (GetKeyState(VK_CONTROL) < 0)
-            SendMessage(hwnd, EM_REPLACESEL, 0, (LPARAM)(LPSTR)"\r\n");
-        else
-            PostMessage(hwndMain, WM_COMMAND, IDC_SEND, 0L);
+    HMENU menu = CreatePopupMenu();
+    DWORD sel;
+    UINT copyFlags = MF_STRING;
+    UINT pasteFlags = MF_STRING;
+    POINT pt;
+
+    if (!menu)
+        return;
+    sel = (DWORD)SendMessage(hwndEdit, EM_GETSEL, 0, 0L);
+    if (LOWORD(sel) == HIWORD(sel))
+        copyFlags |= MF_GRAYED;
+    if (GetDlgCtrlID(hwndEdit) != IDC_INPUT)
+        pasteFlags |= MF_GRAYED;
+    AppendMenu(menu, copyFlags, IDM_COPY, "复制");
+    AppendMenu(menu, pasteFlags, IDM_PASTE, "粘贴");
+
+    pt.x = (short)LOWORD(lParam);
+    pt.y = (short)HIWORD(lParam);
+    ClientToScreen(hwndEdit, &pt);
+    SetFocus(hwndEdit);
+    hwndContext = hwndEdit;
+    TrackPopupMenu(menu, TPM_LEFTALIGN, pt.x, pt.y, 0, hwndMain, NULL);
+    DestroyMenu(menu);
+}
+
+/* Enter sends; Ctrl+Enter inserts a line break. Right-click opens Copy/Paste. */
+LRESULT CALLBACK _export EditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    FARPROC oldProc = hwnd == hwndInput ? lpfnOldInput : lpfnOldLog;
+
+    if (msg == WM_RBUTTONUP) {
+        ShowEditMenu(hwnd, lParam);
         return 0;
     }
-    if (msg == WM_CHAR && (wParam == '\r' || wParam == '\n'))
-        return 0;
-    return CallWindowProc(lpfnOldInput, hwnd, msg, wParam, lParam);
+    if (hwnd == hwndInput) {
+        if (msg == WM_KEYDOWN && wParam == VK_RETURN) {
+            if (GetKeyState(VK_CONTROL) < 0)
+                SendMessage(hwnd, EM_REPLACESEL, 0, (LPARAM)(LPSTR)"\r\n");
+            else
+                PostMessage(hwndMain, WM_COMMAND, IDC_SEND, 0L);
+            return 0;
+        }
+        if (msg == WM_CHAR && (wParam == '\r' || wParam == '\n'))
+            return 0;
+    }
+    return CallWindowProc(oldProc, hwnd, msg, wParam, lParam);
 }
 
 /* ---- main window ----------------------------------------------------- */
 
 static void Layout(int cx, int cy)
 {
-    int m = 6, bw = 72, bh = lineH + 10;
+    int m = 6, bw = 72, bh = lineH + 10, sw = 132;
     int sh = lineH + 4;                 /* status line */
     int ih = 2 * bh + m;                /* input box = two buttons tall */
     int iy = cy - m - sh - m - ih;
+    int rightX = m + sw + m;
 
-    MoveWindow(hwndLog, m, m, cx - 2 * m, iy - 2 * m, TRUE);
-    MoveWindow(hwndInput, m, iy, cx - 3 * m - bw, ih, TRUE);
+    /* "New" sits flush with the bottom edge of the input box */
+    MoveWindow(hwndSessions, m, m, sw, iy + ih - bh - 2 * m, TRUE);
+    MoveWindow(hwndNew, m, iy + ih - bh, sw, bh, TRUE);
+    MoveWindow(hwndLog, rightX, m, cx - rightX - m, iy - 2 * m, TRUE);
+    MoveWindow(hwndInput, rightX, iy, cx - rightX - 3 * m - bw, ih, TRUE);
     MoveWindow(hwndSend, cx - m - bw, iy, bw, bh, TRUE);
-    MoveWindow(hwndNew, cx - m - bw, iy + bh + m, bw, bh, TRUE);
     MoveWindow(hwndStatus, m, cy - m - sh, cx - 2 * m, sh, TRUE);
 }
 
@@ -315,9 +418,14 @@ static void Create(HWND hwnd)
 {
     TEXTMETRIC tm;
     HDC        hdc = GetDC(hwnd);
+    HFONT      hfontOld;
     DCB        dcb;
 
+    /* Use Windows 3.2's built-in raster System font for crisp text. */
+    hfontChat = (HFONT)GetStockObject(SYSTEM_FONT);
+    hfontOld = (HFONT)SelectObject(hdc, hfontChat);
     GetTextMetrics(hdc, &tm);
+    SelectObject(hdc, hfontOld);
     ReleaseDC(hwnd, hdc);
     lineH = tm.tmHeight;
 
@@ -329,14 +437,25 @@ static void Create(HWND hwnd)
                              0, 0, 0, 0, hwnd, (HMENU)IDC_INPUT, hInst, NULL);
     hwndSend = CreateWindow("BUTTON", "Send", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                             0, 0, 0, 0, hwnd, (HMENU)IDC_SEND, hInst, NULL);
-    hwndNew = CreateWindow("BUTTON", "New", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+    hwndSessions = CreateWindow("LISTBOX", "", WS_CHILD | WS_VISIBLE | WS_BORDER |
+                                WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
+                                0, 0, 0, 0, hwnd, (HMENU)IDC_SESSIONS, hInst, NULL);
+    hwndNew = CreateWindow("BUTTON", "新建", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                            0, 0, 0, 0, hwnd, (HMENU)IDC_NEW, hInst, NULL);
     hwndStatus = CreateWindow("STATIC", "", WS_CHILD | WS_VISIBLE | SS_LEFT,
                               0, 0, 0, 0, hwnd, (HMENU)IDC_STATUS, hInst, NULL);
+    if (hfontChat) {
+        SendMessage(hwndLog, WM_SETFONT, (WPARAM)hfontChat, TRUE);
+        SendMessage(hwndInput, WM_SETFONT, (WPARAM)hfontChat, TRUE);
+        SendMessage(hwndSend, WM_SETFONT, (WPARAM)hfontChat, TRUE);
+        SendMessage(hwndSessions, WM_SETFONT, (WPARAM)hfontChat, TRUE);
+        SendMessage(hwndNew, WM_SETFONT, (WPARAM)hfontChat, TRUE);
+        SendMessage(hwndStatus, WM_SETFONT, (WPARAM)hfontChat, TRUE);
+    }
     SendMessage(hwndInput, EM_LIMITTEXT, INMAX, 0L);
-
-    lpfnInput = MakeProcInstance((FARPROC)InputProc, hInst);
-    lpfnOldInput = (FARPROC)SetWindowLong(hwndInput, GWL_WNDPROC, (LONG)lpfnInput);
+    lpfnEdit = MakeProcInstance((FARPROC)EditProc, hInst);
+    lpfnOldLog = (FARPROC)SetWindowLong(hwndLog, GWL_WNDPROC, (LONG)lpfnEdit);
+    lpfnOldInput = (FARPROC)SetWindowLong(hwndInput, GWL_WNDPROC, (LONG)lpfnEdit);
 
     cid = OpenComm(PORT, RXMAX * 4, 2048);
     if (cid < 0) {
@@ -385,6 +504,16 @@ LRESULT CALLBACK _export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         return 0;
     case WM_COMMAND:
         switch (wParam) {
+        case IDM_COPY:
+            if (hwndContext)
+                SendMessage(hwndContext, WM_COPY, 0, 0L);
+            hwndContext = NULL;
+            return 0;
+        case IDM_PASTE:
+            if (hwndContext && GetDlgCtrlID(hwndContext) == IDC_INPUT)
+                SendMessage(hwndInput, WM_PASTE, 0, 0L);
+            hwndContext = NULL;
+            return 0;
         case IDC_SEND:
             DoSend();
             return 0;
@@ -396,14 +525,27 @@ LRESULT CALLBACK _export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             SetBusy(FALSE);
             SetFocus(hwndInput);
             return 0;
+        case IDC_SESSIONS:
+            if (HIWORD(lParam) == LBN_SELCHANGE && cid >= 0) {
+                int index = (int)SendMessage(hwndSessions, LB_GETCURSEL, 0, 0L);
+                char command[32];
+
+                if (index >= 0) {
+                    wsprintf(command, "SWITCH %d", index);
+                    SendLine(command);
+                    Status("Switching session...");
+                }
+            }
+            return 0;
         }
         break;
     case WM_DESTROY:
         KillTimer(hwnd, 1);
         if (cid >= 0)
             CloseComm(cid);
+        SetWindowLong(hwndLog, GWL_WNDPROC, (LONG)lpfnOldLog);
         SetWindowLong(hwndInput, GWL_WNDPROC, (LONG)lpfnOldInput);
-        FreeProcInstance(lpfnInput);
+        FreeProcInstance(lpfnEdit);
         DeleteObject(hbrFace);
         PostQuitMessage(0);
         return 0;

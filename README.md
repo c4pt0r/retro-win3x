@@ -84,11 +84,14 @@ only download them if you are entitled to use them.
 - Path: `CHAT.EXE` ⇄ COM2 ⇄ `vm/com2.sock` ⇄ `w16chatd` ⇄ `pi -p --mode json --session-id <conversation>`.
 - `run.sh` starts `w16chatd` in the background (log: `vm/w16chatd.log`); pi runs in `~/w16chat`.
   Other directory or pi options: `w16chatd --cwd DIR -- --model xxx --no-tools`.
-- The window title shows `LLM - <agent> - <model>`. Enter sends, Ctrl+Enter inserts a line break;
-  while a reply is streaming the Send button becomes Stop; New starts a new pi session.
+- The title shows `LLM - <agent> - <model> [current/total]`. The left pane lists sessions; select one
+  to switch and restore its transcript. New starts a session. Sessions are kept for the current
+  `w16chatd` run. Enter sends; Ctrl+Enter inserts a line break; the Send button becomes Stop while
+  replying. Right-click the transcript or input box for Copy/Paste.
 - Protocol (one command per line, payload = base64 of GBK text): Windows → Linux `HELLO` / `MSG` /
-  `NEW` / `STOP`; Linux → Windows `B` (reply begins), `T` (text), `E` (reply ends), `S` (status line),
-  `X` (error), `I` (`agent|model` for the title).
+  `NEW` / `SWITCH <index>` / `STOP`; Linux → Windows `B` (reply begins), `T` (text), `C` (clear),
+  `L` (session names), `E` (reply ends), `S` (status line), `X` (error), `I` (`agent|model`) and
+  `V` (`current/total`).
 
 Note: pi can run commands and edit files on the host (in its working directory). Use
 `w16chatd -- --no-tools` for chat only.
