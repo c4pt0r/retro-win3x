@@ -71,12 +71,36 @@ LRESULT CALLBACK _export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         SetTimer(hwnd, 1, 1000, NULL);
         return 0;
     case WM_TIMER:
-        InvalidateRect(hwnd, NULL, TRUE);
+        InvalidateRect(hwnd, NULL, FALSE);  /* no erase: WM_PAINT covers it all */
         return 0;
-    case WM_PAINT:
-        Paint(hwnd, BeginPaint(hwnd, &ps));
+    case WM_ERASEBKGND:
+        return 1;                           /* background is drawn off-screen */
+    case WM_PAINT: {
+        /* double buffer: draw the whole frame into a memory bitmap, then
+           copy it to the screen in one BitBlt, so nothing flickers */
+        HDC     hdc = BeginPaint(hwnd, &ps), mem;
+        HBITMAP bmp, oldbmp;
+        HBRUSH  br;
+        RECT    rc;
+
+        GetClientRect(hwnd, &rc);
+        mem = CreateCompatibleDC(hdc);
+        bmp = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);  /* screen DC, not mem */
+        oldbmp = SelectObject(mem, bmp);
+        /* Win16 FillRect needs a real brush: the (HBRUSH)(COLOR_xxx + 1)
+           shortcut only works for a window class's hbrBackground */
+        br = CreateSolidBrush(GetSysColor(COLOR_WINDOW));
+        FillRect(mem, &rc, br);
+        DeleteObject(br);
+        SetTextColor(mem, GetSysColor(COLOR_WINDOWTEXT));
+        Paint(hwnd, mem);
+        BitBlt(hdc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
+        SelectObject(mem, oldbmp);
+        DeleteObject(bmp);
+        DeleteDC(mem);
         EndPaint(hwnd, &ps);
         return 0;
+    }
     case WM_COMMAND:
         switch (wParam) {
         case IDM_ABOUT:

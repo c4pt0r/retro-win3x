@@ -26,6 +26,9 @@ static int       lineH;
 static char      rx[RXMAX];
 static int       rxlen;
 static char      agent[32] = "LLM";
+static char      pend[RXMAX];       /* reply text collected during one Poll() */
+static int       pendlen;
+static char      status[128];
 static HBRUSH    hbrFace;
 
 /* ---- base64 ---------------------------------------------------------- */
@@ -109,8 +112,12 @@ static void Append(const char *s)
         int cut = (int)SendMessage(hwndLog, EM_LINEINDEX, line + 1, 0L);
 
         if (cut > 0) {
+            /* deleting the top scrolls everything: repaint once, not twice */
+            SendMessage(hwndLog, WM_SETREDRAW, FALSE, 0L);
             SendMessage(hwndLog, EM_SETSEL, 0, MAKELONG(0, cut));
             SendMessage(hwndLog, EM_REPLACESEL, 0, (LPARAM)(LPSTR)"");
+            SendMessage(hwndLog, WM_SETREDRAW, TRUE, 0L);
+            InvalidateRect(hwndLog, NULL, TRUE);
             len = GetWindowTextLength(hwndLog);
         }
     }
@@ -118,8 +125,36 @@ static void Append(const char *s)
     SendMessage(hwndLog, EM_REPLACESEL, 0, (LPARAM)(LPSTR)s);
 }
 
+/* Reply text is queued and inserted once per timer tick: one EM_REPLACESEL
+   (one repaint) instead of one per serial line. */
+static void Flush(void)
+{
+    if (pendlen) {
+        pend[pendlen] = '\0';
+        pendlen = 0;
+        Append(pend);
+    }
+}
+
+static void Queue(const char *s)
+{
+    int n = lstrlen(s);
+
+    if (pendlen + n >= RXMAX - 1)
+        Flush();
+    if (n >= RXMAX - 1) {
+        Append(s);
+        return;
+    }
+    memcpy(pend + pendlen, s, n);
+    pendlen += n;
+}
+
 static void Status(const char *s)
 {
+    if (lstrcmp(s, status) == 0)        /* avoid repainting the same text */
+        return;
+    lstrcpyn(status, s, sizeof(status));
     SetWindowText(hwndStatus, s);
 }
 
@@ -143,6 +178,7 @@ static void DoSend(void)
     n = GetWindowText(hwndInput, text, sizeof(text));
     if (n == 0)
         return;
+    Flush();
     if (GetWindowTextLength(hwndLog) > 0)
         Append("\r\n");
     Append("Me: ");
@@ -163,17 +199,27 @@ static void HandleLine(char *s)
 
     switch (s[0]) {
     case 'B':
-        Append("\r\n");
-        Append(agent);
-        Append(": ");
+        Queue("\r\n");
+        Queue(agent);
+        Queue(": ");
         break;
-    case 'T':
+    case 'T': {                         /* EDIT needs CR LF: fix bare LF */
+        static char fixed[RXMAX * 2];
+        char *p, *o = fixed;
+
         B64Decode(s + 2, text);
-        Append(text);
+        for (p = text; *p; p++) {
+            if (*p == '\n' && (p == text || p[-1] != '\r'))
+                *o++ = '\r';
+            *o++ = *p;
+        }
+        *o = '\0';
+        Queue(fixed);
         break;
+    }
     case 'E':
         if (busy)
-            Append("\r\n");
+            Queue("\r\n");
         SetBusy(FALSE);
         break;
     case 'I': {                         /* "agent|model" -> window title */
@@ -194,9 +240,9 @@ static void HandleLine(char *s)
         break;
     case 'X':
         B64Decode(s + 2, text);
-        Append("\r\n[Error] ");
-        Append(text);
-        Append("\r\n");
+        Queue("\r\n[Error] ");
+        Queue(text);
+        Queue("\r\n");
         Status(text);
         break;
     }
@@ -230,6 +276,7 @@ static void Poll(void)
         if (rxlen >= RXMAX - 1)         /* garbage without newline */
             rxlen = 0;
     }
+    Flush();
 }
 
 /* ---- input box: Enter sends, Ctrl+Enter = new line ------------------- */
@@ -344,6 +391,7 @@ LRESULT CALLBACK _export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         case IDC_NEW:
             if (cid >= 0)
                 SendLine("NEW");
+            pendlen = 0;
             SetWindowText(hwndLog, "");
             SetBusy(FALSE);
             SetFocus(hwndInput);
@@ -390,7 +438,7 @@ int PASCAL WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmd, int nShow)
     if (!RegisterClass(&wc))
         return 0;
 
-    hwndMain = CreateWindow("PiChat", "LLM", WS_OVERLAPPEDWINDOW,
+    hwndMain = CreateWindow("PiChat", "LLM", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
                             CW_USEDEFAULT, CW_USEDEFAULT, 560, 400,
                             NULL, NULL, hInstance, NULL);
     ShowWindow(hwndMain, nShow);
