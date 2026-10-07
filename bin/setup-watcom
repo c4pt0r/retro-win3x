@@ -4,7 +4,7 @@
 set -euo pipefail
 DEST=${WATCOM:-$HOME/opt/watcom}
 URL=https://github.com/open-watcom/open-watcom-v2/releases/download/Current-build/ow-snapshot.tar.xz
-if [[ -x $DEST/binl64/wcc ]]; then echo "Open Watcom already in $DEST"; exit 0; fi
+if [[ -x $DEST/binl64/wcc || -x $DEST/armo64/wcc || -x $DEST/bino64/wcc ]]; then echo "Open Watcom already in $DEST"; exit 0; fi
 mkdir -p "$DEST"
 echo "downloading $URL ..."
 curl -fL "$URL" | tar xJ -C "$DEST"

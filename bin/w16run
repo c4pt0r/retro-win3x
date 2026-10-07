@@ -37,8 +37,8 @@ w16ctl RUN "A:\\$DOSEXE${*:+ $*}"
 
 if (( ! NOSHOT )); then
     sleep "$WAIT"
-    tmp=$(mktemp --suffix=.ppm)
+    tmp=$(mktemp -d)/shot.ppm
     mon "screendump $tmp"; sleep 0.5
-    magick "$tmp" "$SHOT"; rm -f "$tmp"
+    magick "$tmp" "$SHOT"; rm -rf "$(dirname "$tmp")"
     echo "screenshot: $SHOT"
 fi

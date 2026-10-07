@@ -16,7 +16,8 @@ if [ ! -f "$DISK" ]; then
     qemu-img create -q -f qcow2 -b "../images/$NAME.qcow2" -F qcow2 "$DISK"
 fi
 [ -f exchange.img ] || w31x init
-pgrep -f '^python3 .*w16chatd' >/dev/null || (setsid w16chatd >>w16chatd.log 2>&1 &)
+pgrep -if 'python.*w16chatd' >/dev/null || (nohup w16chatd -- --model "${W16CHAT_MODEL:-openai/gpt-6-luna}" >>w16chatd.log 2>&1 </dev/null &)
+case $(uname) in Darwin) DISPLAY_OPT=cocoa,zoom-to-fit=on,full-grab=on ;; *) DISPLAY_OPT=gtk ;; esac
 exec qemu-system-i386 -machine pc -cpu 486 -m 32 \
   -drive file="$DISK",format=qcow2,if=ide \
   -drive file=exchange.img,format=raw,if=floppy,index=0 \
@@ -25,4 +26,4 @@ exec qemu-system-i386 -machine pc -cpu 486 -m 32 \
   -monitor unix:qemu-monitor.sock,server,nowait \
   -serial unix:com1.sock,server,nowait \
   -serial unix:com2.sock,server,nowait \
-  -display gtk -name "Windows $NAME"
+  -display "$DISPLAY_OPT" -name "Windows $NAME"

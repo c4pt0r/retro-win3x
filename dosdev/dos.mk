@@ -6,7 +6,13 @@
 #   include $(HOME)/dosdev/dos.mk
 WATCOM  ?= $(HOME)/opt/watcom
 export WATCOM
-export PATH    := $(WATCOM)/binl64:$(WATCOM)/binl:$(PATH)
+# host binaries: binl64 (Linux x64), arml64 (Linux arm64), bino64 (macOS x64), armo64 (macOS arm64)
+WBIN    := $(firstword $(foreach d,$(if $(filter Darwin,$(shell uname -s)),\
+             $(if $(filter arm64,$(shell uname -m)),armo64,bino64),\
+             $(if $(filter aarch64 arm64,$(shell uname -m)),arml64,binl64)),$(WATCOM)/$(d)))
+export PATH    := $(WBIN):$(WATCOM)/binl:$(PATH)
+# make 3.81 (macOS) execs simple commands without a shell using its own PATH
+SHELL   := env PATH=$(PATH) /bin/sh
 export INCLUDE := $(WATCOM)/h
 export EDPATH  := $(WATCOM)/eddat
 
